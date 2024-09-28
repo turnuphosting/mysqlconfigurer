@@ -18,14 +18,15 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v4
       with:
-        go-version: '1.19.1'
+        go-version: '1.22.0'
 
     - name: Build
       run: bash build.sh
+      
     - name: Create upload dir
       run: |
         mkdir -p ../v2
-        cp current_version_agent install.sh mysqlconfigurer.sh releem-agent-x86_64 releem-agent-amd64 releem-agent-aarch64 releem-agent-freebsd-amd64 ../v2/
+        cp current_version_agent install.sh mysqlconfigurer.sh releem-agent-x86_64 releem-agent-amd64 releem-agent-aarch64 releem-agent-freebsd-amd64 releem-agent-i686 ../v2/
 
     - uses: shallwefootball/s3-upload-action@master
       name: Upload S3 current_version_agent

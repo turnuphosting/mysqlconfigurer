@@ -3,16 +3,16 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"flag"
+	"fmt"
 	"os"
-	"strings"
 
 	"github.com/Releem/daemon"
 	"github.com/Releem/mysqlconfigurer/config"
 	m "github.com/Releem/mysqlconfigurer/metrics"
 	r "github.com/Releem/mysqlconfigurer/repeater"
-	t "github.com/Releem/mysqlconfigurer/tasks"
+	u "github.com/Releem/mysqlconfigurer/utils"
+
 	"github.com/advantageous/go-logback/logging"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs"
@@ -45,19 +45,10 @@ type Service struct {
 // 	return fileInfo.Mode().Type() == fs.ModeSocket
 // }
 
-func IsPath(path string, logger logging.Logger) bool {
-	result_path := strings.Index(path, "/")
-	if result_path == 0 {
-		return true
-	} else {
-		return false
-	}
-}
-
 // Manage by daemon commands or run the daemon
 func (service *Service) Manage(logger logging.Logger, configFile string, command []string, TypeConfiguration string, AgentEvent string, AgentTask string) (string, error) {
-	var gatherers, gatherers_configuration []m.MetricsGatherer
-	var Mode m.Mode
+	var gatherers, gatherers_configuration, gatherers_query_optimization []m.MetricsGatherer
+	var Mode m.ModeT
 	var configuration *config.Config
 	usage := "Usage: myservice install | remove | start | stop | status"
 
@@ -109,6 +100,7 @@ func (service *Service) Manage(logger logging.Logger, configFile string, command
 		awscfg, err := awsconfig.LoadDefaultConfig(context.TODO(), awsconfig.WithRegion(configuration.AwsRegion))
 		if err != nil {
 			logger.PrintError("Load AWS configuration FAILED", err)
+			return "Error", err
 		} else {
 			logger.Println("AWS configuration loaded SUCCESS")
 		}
@@ -129,11 +121,12 @@ func (service *Service) Manage(logger logging.Logger, configFile string, command
 		if err != nil {
 			if aerr, ok := err.(awserr.Error); ok {
 				logger.Error(aerr.Error())
-
+				return "Error", aerr
 			} else {
 				// Print the error, cast err to awserr.Error to get the Code and
 				// Message from an error.
 				logger.Error(err.Error())
+				return "Error", err
 			}
 		}
 
@@ -146,71 +139,46 @@ func (service *Service) Manage(logger logging.Logger, configFile string, command
 			configuration.Hostname = configuration.AwsRDSDB
 			configuration.MysqlHost = *result.DBInstances[0].Endpoint.Address
 			gatherers = append(gatherers, m.NewAWSRDSEnhancedMetricsGatherer(nil, result.DBInstances[0], cwlogsclient, configuration))
-		} else if len(result.DBInstances) > 1 {
+		} else if result != nil && len(result.DBInstances) > 1 {
 			logger.Println("RDS.DescribeDBInstances: Database has %d instances. Clusters are not supported", len(result.DBInstances))
+			return "Error", fmt.Errorf("RDS.DescribeDBInstances: Database has %d instances. Clusters are not supported", len(result.DBInstances))
 		} else {
 			logger.Println("RDS.DescribeDBInstances: No instances")
+			return "Error", fmt.Errorf("RDS.DescribeDBInstances: No instances")
 		}
 	default:
 		logger.Println("InstanceType is Local")
 		gatherers = append(gatherers, m.NewOSMetricsGatherer(nil, configuration))
 
 	}
-	// }
 
-	// Init connection DB
-	var db *sql.DB
-	var TypeConnection, MysqlSslMode string
-
-	if configuration.MysqlSslMode {
-		MysqlSslMode = "?tls=skip-verify"
-	} else {
-		MysqlSslMode = ""
-	}
-	if IsPath(configuration.MysqlHost, logger) {
-		db, err = sql.Open("mysql", configuration.MysqlUser+":"+configuration.MysqlPassword+"@unix("+configuration.MysqlHost+")/mysql"+MysqlSslMode)
-		TypeConnection = "unix"
-
-	} else {
-		db, err = sql.Open("mysql", configuration.MysqlUser+":"+configuration.MysqlPassword+"@tcp("+configuration.MysqlHost+":"+configuration.MysqlPort+")/mysql"+MysqlSslMode)
-		TypeConnection = "tcp"
-	}
-	if err != nil {
-		logger.PrintError("Connection opening to failed", err)
-	}
-
-	err = db.Ping()
-	if err != nil {
-		logger.PrintError("Connection failed", err)
-	} else {
-		if TypeConnection == "unix" {
-			logger.Println("Connect Success to DB via unix socket", configuration.MysqlHost)
-		} else if TypeConnection == "tcp" {
-			logger.Println("Connect Success to DB via tcp", configuration.MysqlHost)
-		}
-	}
-	defer db.Close()
+	config.DB = u.ConnectionDatabase(configuration, logger, "mysql")
+	defer config.DB.Close()
 
 	//Init repeaters
-	repeaters := make(map[string]m.MetricsRepeater)
-	repeaters["Metrics"] = m.MetricsRepeater(r.NewReleemMetricsRepeater(configuration))
-	repeaters["Configurations"] = m.MetricsRepeater(r.NewReleemConfigurationsRepeater(configuration, Mode))
-	repeaters["Event"] = m.MetricsRepeater(r.NewReleemEventRepeater(configuration, Mode))
-	repeaters["TaskGet"] = m.MetricsRepeater(t.NewReleemTaskGetRepeater(configuration))
-	repeaters["TaskStatus"] = m.MetricsRepeater(t.NewReleemTaskStatusRepeater(configuration))
-	repeaters["TaskSet"] = m.MetricsRepeater(t.NewReleemTaskSetRepeater(configuration, Mode))
+	// repeaters := make(map[string]m.MetricsRepeater)
+	// repeaters["Metrics"] = m.MetricsRepeater(r.NewReleemConfigurationsRepeater(configuration, m.Mode{Name: "Metrics", ModeType: ""}))
+	// repeaters["Configurations"] = m.MetricsRepeater(r.NewReleemConfigurationsRepeater(configuration, Mode))
+	// repeaters["Event"] = m.MetricsRepeater(r.NewReleemConfigurationsRepeater(configuration, Mode))
+	// repeaters["TaskGet"] = m.MetricsRepeater(r.NewReleemConfigurationsRepeater(configuration, m.Mode{Name: "TaskGet", ModeType: ""}))
+	// repeaters["TaskStatus"] = m.MetricsRepeater(r.NewReleemConfigurationsRepeater(configuration, m.Mode{Name: "TaskStatus", ModeType: ""}))
+	// repeaters["TaskSet"] = m.MetricsRepeater(r.NewReleemConfigurationsRepeater(configuration, Mode))
+	// repeaters["GetConfigurationJson"] = m.MetricsRepeater(r.NewReleemConfigurationsRepeater(configuration, m.Mode{Name: "Configurations", ModeType: "get-json"}))
+	// repeaters["QueryOptimization"] = m.MetricsRepeater(r.NewReleemConfigurationsRepeater(configuration, m.Mode{Name: "Metrics", ModeType: "QuerysOptimization"}))
+	// repeaters["QueriesOptimization"] = m.MetricsRepeater(r.NewReleemConfigurationsRepeater(configuration, m.Mode{Name: "TaskSet", ModeType: "queries_optimization"}))
+	//var repeaters m.MetricsRepeater
+	repeaters := m.MetricsRepeater(r.NewReleemConfigurationsRepeater(configuration))
 
 	//Init gatherers
 	gatherers = append(gatherers,
-		m.NewDbConfGatherer(nil, db, configuration),
-		m.NewDbInfoGatherer(nil, db, configuration),
-		m.NewDbMetricsBaseGatherer(nil, db, configuration),
+		m.NewDbConfGatherer(nil, configuration),
+		m.NewDbInfoGatherer(nil, configuration),
+		m.NewDbMetricsBaseGatherer(nil, configuration),
 		m.NewAgentMetricsGatherer(nil, configuration))
-	gatherers_configuration = append(gatherers_configuration, m.NewDbMetricsGatherer(nil, db, configuration))
-	if Mode.Name == "TaskSet" && Mode.ModeType == "collect_queries" {
-		gatherers = append(gatherers, m.NewDbCollectQueries(nil, db, configuration))
-	}
-	m.RunWorker(gatherers, gatherers_configuration, repeaters, nil, configuration, configFile, Mode)
+	gatherers_configuration = append(gatherers_configuration, m.NewDbMetricsGatherer(nil, configuration))
+	gatherers_query_optimization = append(gatherers_query_optimization, m.NewDbCollectQueriesOptimization(nil, configuration))
+
+	m.RunWorker(gatherers, gatherers_configuration, gatherers_query_optimization, repeaters, nil, configuration, configFile, Mode)
 
 	// never happen, but need to complete code
 	return usage, nil
@@ -222,7 +190,7 @@ func main() {
 
 	configFile := flag.String("config", "/opt/releem/releem.conf", "Releem agent config")
 	SetConfigRun := flag.Bool("f", false, "Releem agent generate config")
-	GetConfigRun := flag.Bool("c", false, "Releem agent generate config")
+	GetConfigRun := flag.Bool("c", false, "Releem agent get config")
 
 	AgentEvent := flag.String("event", "", "Releem agent type event")
 	AgentTask := flag.String("task", "", "Releem agent task name")
